@@ -6,7 +6,7 @@
 	"scripts": {
 		"setup": "tsx scripts/setup.ts",
 		"prepare": "husky",
-		"dev": "DEV_MODE=true vite",
+		"dev": "DEV_MODE=true WRANGLER_DOCKER_BIN=./scripts/docker-host-network.sh vite",
 		"dev:reset": "bash scripts/dev-reset.sh",
 		"templates:redeploy": "bash scripts/redeploy-templates.sh",
 		"build": "tsc -b --incremental && vite build",
