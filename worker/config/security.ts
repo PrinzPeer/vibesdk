@@ -61,11 +61,24 @@ export function getAllowedOrigins(env: Env): string[] {
 }
 
 export function isOriginAllowed(env: Env, origin: string): boolean {
-    const allowedOrigins = getAllowedOrigins(env);
     if (!origin) return false;
-    
-    // Check against allowed origins
-    return allowedOrigins.includes(origin);
+
+    const allowedOrigins = getAllowedOrigins(env);
+    if (allowedOrigins.includes(origin)) return true;
+
+    // Allow any subdomain of the configured custom/preview domain so preview
+    // iframes (e.g. https://<id>.vibesdk.example.com) can call back to the API.
+    try {
+        const { hostname, protocol } = new URL(origin);
+        if (protocol !== 'https:' && protocol !== 'http:') return false;
+
+        const candidates = [env.CUSTOM_DOMAIN, env.CUSTOM_PREVIEW_DOMAIN].filter(
+            (d): d is string => !!d && d.trim() !== ''
+        );
+        return candidates.some(d => hostname.endsWith(`.${d}`));
+    } catch {
+        return false;
+    }
 }
 
 /**
@@ -74,7 +87,7 @@ export function isOriginAllowed(env: Env, origin: string): boolean {
  */
 export function getCORSConfig(env: Env): CORSConfig {
     return {
-        origin: getAllowedOrigins(env),
+        origin: (origin) => isOriginAllowed(env, origin) ? origin : null,
         allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
         allowHeaders: [
             'Content-Type',
