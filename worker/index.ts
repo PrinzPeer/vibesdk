@@ -23,11 +23,27 @@ export const DORateLimitStore = BaseDORateLimitStore;
 // Logger for the main application and handlers
 const logger = createLogger('App');
 
-function setOriginControl(env: Env, request: Request, currentHeaders: Headers): Headers {
+const UPSTREAM_CORS_HEADERS = [
+    'Access-Control-Allow-Origin',
+    'Access-Control-Allow-Credentials',
+    'Access-Control-Allow-Methods',
+    'Access-Control-Allow-Headers',
+    'Access-Control-Expose-Headers',
+    'Access-Control-Max-Age',
+] as const;
+
+// Strip CORS headers emitted by the upstream (e.g. Vite dev server defaults to
+// `Access-Control-Allow-Origin: *`) so the worker can apply its own allow-list
+// without producing duplicate values that browsers reject.
+function normalizeCorsHeaders(env: Env, request: Request, currentHeaders: Headers): Headers {
+    for (const header of UPSTREAM_CORS_HEADERS) {
+        currentHeaders.delete(header);
+    }
+
     const origin = request.headers.get('Origin');
-    
     if (origin && isOriginAllowed(env, origin)) {
         currentHeaders.set('Access-Control-Allow-Origin', origin);
+        currentHeaders.set('Access-Control-Allow-Credentials', 'true');
     }
     return currentHeaders;
 }
@@ -88,7 +104,7 @@ async function handleUserAppRequest(request: Request, env: Env): Promise<Respons
         } else {
             headers.set('X-Preview-Type', 'sandbox');
         }
-        headers = setOriginControl(env, request, headers);
+        headers = normalizeCorsHeaders(env, request, headers);
         headers.append('Vary', 'Origin');
 		headers.set('Access-Control-Expose-Headers', 'X-Preview-Type');
 		
@@ -118,7 +134,7 @@ async function handleUserAppRequest(request: Request, env: Env): Promise<Respons
 		let headers = new Headers(dispatcherResponse.headers);
 
 		headers.set('X-Preview-Type', 'dispatcher');
-        headers = setOriginControl(env, request, headers);
+        headers = normalizeCorsHeaders(env, request, headers);
         headers.append('Vary', 'Origin');
 		headers.set('Access-Control-Expose-Headers', 'X-Preview-Type');
 
