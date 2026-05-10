@@ -24,6 +24,21 @@ import { ProcessedImageAttachment } from 'worker/types/image-attachment';
 import { getTemplateImportantFiles } from 'worker/services/sandbox/utils';
 import { hasTicketParam } from '../../../middleware/auth/ticketAuth';
 
+// When the worker is behind a reverse proxy (e.g. Caddy/Cloudflare) the proxy
+// may rewrite the Host header and terminate TLS, so request.url reflects the
+// internal hop (e.g. http://localhost) rather than the browser-visible origin.
+// Prefer X-Forwarded-* so the WebSocket URL we hand back to the browser is
+// reachable from the browser.
+function getExternalWsBase(request: Request): string {
+    const url = new URL(request.url);
+    const forwardedHost = request.headers.get('X-Forwarded-Host');
+    const forwardedProto = request.headers.get('X-Forwarded-Proto');
+    const host = forwardedHost || url.host;
+    const proto = forwardedProto || url.protocol.replace(':', '');
+    const wsProto = proto === 'https' ? 'wss:' : 'ws:';
+    return `${wsProto}//${host}`;
+}
+
 const defaultCodeGenArgs: Partial<CodeGenArgs> = {
     language: 'typescript',
     frameworks: ['react', 'vite'],
@@ -142,7 +157,7 @@ export class CodingAgentController extends BaseController {
 
             const { templateDetails, selection, projectType: finalProjectType } = await getTemplateForQuery(env, inferenceContext, query, projectType, body.images, this.logger, body.selectedTemplate);
 
-            const websocketUrl = `${url.protocol === 'https:' ? 'wss:' : 'ws:'}//${url.host}/api/agent/${agentId}/ws`;
+            const websocketUrl = `${getExternalWsBase(request)}/api/agent/${agentId}/ws`;
             const httpStatusUrl = `${url.origin}/api/agent/${agentId}`;
 
             let uploadedImages: ProcessedImageAttachment[] = [];
@@ -306,9 +321,8 @@ export class CodingAgentController extends BaseController {
                 }
                 this.logger.info(`Successfully connected to existing agent: ${agentId}`);
 
-                // Construct WebSocket URL
-                const url = new URL(request.url);
-                const websocketUrl = `${url.protocol === 'https:' ? 'wss:' : 'ws:'}//${url.host}/api/agent/${agentId}/ws`;
+                // Construct WebSocket URL — uses X-Forwarded-* so reverse-proxied deployments work.
+                const websocketUrl = `${getExternalWsBase(request)}/api/agent/${agentId}/ws`;
 
                 const responseData: AgentConnectionData = {
                     websocketUrl,
