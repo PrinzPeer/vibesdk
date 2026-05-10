@@ -11,10 +11,15 @@ if lsof -ti :5173 >/dev/null 2>&1; then
 fi
 
 # Drop cached sandbox container images so Dockerfile changes take effect.
-IMAGES=$(docker images -q cloudflare-dev/userappsandboxservice 2>/dev/null || true)
-if [ -n "$IMAGES" ]; then
-  echo "Removing cached sandbox images..."
-  echo "$IMAGES" | xargs docker rmi -f || true
+# Skip cleanly if Docker isn't installed or the daemon isn't running.
+if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+  IMAGES=$(docker images -q cloudflare-dev/userappsandboxservice 2>/dev/null || true)
+  if [ -n "$IMAGES" ]; then
+    echo "Removing cached sandbox images..."
+    echo "$IMAGES" | xargs docker rmi -f || true
+  fi
+else
+  echo "Docker not available — skipping sandbox image cleanup."
 fi
 
 echo "Starting bun run dev..."
