@@ -594,6 +594,11 @@ export function createWebSocketMessageHandler(deps: HandleMessageDeps) {
                 setIsPreviewDeploying(false);
                 const finalPreviewURL = getPreviewUrl(message.previewURL, message.tunnelURL);
                 setPreviewUrl(finalPreviewURL);
+                // The user app's Vite HMR WebSocket can't be relied on through
+                // Caddy → worker → Sandbox DO → container locally, so drive the
+                // iframe reload from here on every sandbox deploy.
+                setShouldRefreshPreview(true);
+                setTimeout(() => setShouldRefreshPreview(false), 100);
                 break;
             }
 
