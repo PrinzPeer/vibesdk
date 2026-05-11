@@ -12,7 +12,7 @@
 		"build": "tsc -b --incremental && vite build",
 		"typecheck": "tsc -b --incremental --noEmit",
 		"lint": "eslint .",
-		"preview": "npm run build && vite preview",
+		"preview": "WRANGLER_DOCKER_BIN=./scripts/docker-host-network.sh npm run build && WRANGLER_DOCKER_BIN=./scripts/docker-host-network.sh vite preview --port 5173",
 		"deploy": "bun --env-file .prod.vars scripts/deploy.ts",
 		"cli": "tsx --tsconfig tsconfig.app.json cli/index.ts",
 		"tui": "tsx --tsconfig tsconfig.app.json cli/tui.tsx",
