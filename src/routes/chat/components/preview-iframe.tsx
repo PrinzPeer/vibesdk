@@ -50,6 +50,16 @@ export const PreviewIframe = forwardRef<HTMLIFrameElement, PreviewIframeProps>(
 		const retryTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 		const hasRequestedRedeployRef = useRef(false);
         const postLoadTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+		// Per-mount cache-bust token. Tab-switching (Preview -> Code -> Preview)
+		// remounts this component; without a unique src per mount, the iframe's
+		// HTTP cache can replay a stale main.tsx referencing optimizer chunks
+		// that no longer exist on disk.
+		const cacheBustRef = useRef<number>(Date.now());
+
+		const withCacheBust = useCallback((url: string): string => {
+			const sep = url.includes('?') ? '&' : '?';
+			return `${url}${sep}_cb=${cacheBustRef.current}`;
+		}, []);
 		// ====================================================================
 		// Core Loading Logic
 		// ====================================================================
@@ -96,26 +106,41 @@ export const PreviewIframe = forwardRef<HTMLIFrameElement, PreviewIframeProps>(
 		}, []);
 
 		/**
-		 * Warm the preview by fetching the app entry so vite finishes its dep
-		 * crawl before the iframe mounts. HEAD / returns 200 while vite is
-		 * still re-bundling; the iframe's parallel ?v=... module requests then
-		 * 504 (or 404 on stale hashes). Fetching src/main.tsx forces vite to
-		 * transform the entry and chain through all app imports, which is what
-		 * "switch to Code tab and back" effectively buys us.
+		 * Warm the preview by polling the app entry until vite's optimizer hash
+		 * stabilizes. HEAD / returns 200 while vite is still re-bundling and a
+		 * single fetch can come back referencing chunks that are about to be
+		 * replaced on disk, producing 404s on the iframe's parallel module
+		 * requests. We treat the optimizer as stable when two consecutive
+		 * fetches of src/main.tsx contain the same first ?v=<hash> token.
 		 */
 		const warmupPreview = useCallback(async (url: string): Promise<boolean> => {
-			try {
-				const entry = await fetch(new URL('src/main.tsx', url).toString(), {
-					method: 'GET',
-					mode: 'cors',
-					cache: 'no-cache',
-					signal: AbortSignal.timeout(20000),
-				});
-				return entry.ok;
-			} catch (error) {
-				console.log('Preview warmup fetch failed:', error);
-				return false;
+			const entryUrl = new URL('src/main.tsx', url).toString();
+			let prevHash: string | null = null;
+			for (let attempt = 0; attempt < 4; attempt++) {
+				try {
+					const entry = await fetch(entryUrl, {
+						method: 'GET',
+						mode: 'cors',
+						cache: 'no-cache',
+						signal: AbortSignal.timeout(20000),
+					});
+					if (!entry.ok) return false;
+					const body = await entry.text();
+					const match = body.match(/\?v=([a-f0-9]+)/);
+					const hash = match ? match[1] : null;
+					if (hash && hash === prevHash) {
+						return true;
+					}
+					prevHash = hash;
+				} catch (error) {
+					console.log('Preview warmup fetch failed:', error);
+					return false;
+				}
+				await new Promise((resolve) => setTimeout(resolve, 1000));
 			}
+			// Fall through after max attempts; outer loadWithRetry retry loop will
+			// catch any remaining races via the iframe error handler.
+			return true;
 		}, []);
 
 		/**
@@ -232,7 +257,7 @@ export const PreviewIframe = forwardRef<HTMLIFrameElement, PreviewIframeProps>(
 				setLoadState({
 					status: 'postload',
 					attempt: attempt + 1,
-					loadedSrc: url,
+					loadedSrc: withCacheBust(url),
 					errorMessage: null,
 					previewType,
 				});
@@ -264,7 +289,7 @@ export const PreviewIframe = forwardRef<HTMLIFrameElement, PreviewIframeProps>(
 					loadWithRetry(url, nextAttempt);
 				}, delay);
 			}
-		}, [testAvailability, warmupPreview, requestScreenshot, requestRedeploy]);
+		}, [testAvailability, warmupPreview, requestScreenshot, requestRedeploy, withCacheBust]);
 
 		/**
 		 * Force a fresh reload from scratch
@@ -272,6 +297,7 @@ export const PreviewIframe = forwardRef<HTMLIFrameElement, PreviewIframeProps>(
 		const forceReload = useCallback(() => {
 			console.log('Force reloading preview');
 			hasRequestedRedeployRef.current = false;
+			cacheBustRef.current = Date.now();
 			
 			if (retryTimeoutRef.current) {
 				clearTimeout(retryTimeoutRef.current);

@@ -634,13 +634,24 @@ export class SandboxSdkClient extends BaseSandboxService {
             // Use session-based process management
             // Note: Environment variables should already be set via setLocalEnvVars
             const session = await this.getOrCreateSession(`${instanceId}-dev`, `/workspace/${instanceId}`);
-            
+
+            // Wipe any persisted vite optimizer cache from a previous run. A stale
+            // .vite/deps manifest causes vite to re-optimize on first transform,
+            // racing the iframe's module requests and yielding 404s on ?v= hashes.
+            // optimizeDeps.include + server.warmup in the template config then
+            // give us a deterministic cold optimize during warmupDevServer below.
+            await this.executeCommand(
+                instanceId,
+                `rm -rf /workspace/${instanceId}/node_modules/.vite || true`,
+                { timeout: 5000 },
+            );
+
             // Start process with env vars inline for those not in .dev.vars
             const process = await session.startProcess(
                 `VITE_LOGGER_TYPE=json PORT=${port} monitor-cli process start --instance-id ${instanceId} --port ${port} -- ${initCommand}`
             );
             this.logger.info('Development server started', { instanceId, processId: process.id });
-            
+
             // Wait for the server to be ready (non-blocking - always returns the process ID)
             try {
                 const isReady = await this.waitForServerReady(instanceId, process.id, 10000);
@@ -653,7 +664,11 @@ export class SandboxSdkClient extends BaseSandboxService {
                 this.logger.warn(`Error during readiness check for ${instanceId}:`, readinessError);
                 this.logger.info('Continuing with server startup despite readiness check error', { instanceId });
             }
-            
+
+            // Warm up before returning so every dev-server boot (not just initial
+            // setupInstance) gets a stable optimizer state before any client load.
+            await this.warmupDevServer(instanceId, port);
+
             return process.id;
         } catch (error) {
             this.logger.warn('Failed to start dev server', error);
@@ -665,18 +680,24 @@ export class SandboxSdkClient extends BaseSandboxService {
      * Warms up the dev server before we expose its preview URL. Without this,
      * the browser can race vite's on-demand dep optimization: mid-load re-
      * optimization changes ?v= hashes and produces 404/504 on module requests.
-     * The template also sets optimizeDeps.include + server.warmup, this is the
-     * belt-and-suspenders layer that also covers stale caches from prior runs.
+     *
+     * Poll /src/main.tsx and extract the first ?v=<hash> token vite injects into
+     * the transformed source. The optimizer is considered stable when two
+     * consecutive fetches yield the same hash. Bounded by a ~30s fallback so a
+     * misbehaving server can't stall startup forever.
      */
     private async warmupDevServer(instanceId: string, port: number): Promise<void> {
         try {
-            await this.executeCommand(
-                instanceId,
-                `curl -s -o /dev/null --max-time 15 http://localhost:${port}/ && ` +
-                    `curl -s -o /dev/null --max-time 15 http://localhost:${port}/src/main.tsx || true`,
-                { timeout: 35000 },
-            );
-            await new Promise((resolve) => setTimeout(resolve, 5000));
+            const stabilityScript =
+                `prev=""; stable=0; for i in $(seq 1 20); do ` +
+                  `body=$(curl -s --max-time 15 http://localhost:${port}/src/main.tsx 2>/dev/null || true); ` +
+                  `hash=$(printf '%s' "$body" | grep -oE '\\?v=[a-f0-9]+' | head -n1 | sed 's/^?v=//'); ` +
+                  `if [ -n "$hash" ] && [ "$hash" = "$prev" ]; then stable=1; echo "vite-optimizer-stable hash=$hash"; break; fi; ` +
+                  `prev="$hash"; sleep 1.5; ` +
+                `done; ` +
+                `if [ "$stable" != "1" ]; then echo "vite-optimizer-warmup-fallback prev=$prev"; fi; ` +
+                `exit 0`;
+            await this.executeCommand(instanceId, stabilityScript, { timeout: 40000 });
             this.logger.info('Dev server warmup complete', { instanceId, port });
         } catch (error) {
             this.logger.warn('Dev server warmup failed (continuing anyway)', { instanceId, error });
@@ -972,11 +993,9 @@ export class SandboxSdkClient extends BaseSandboxService {
                     if (localEnvVars) {
                         await this.setLocalEnvVars(instanceId, localEnvVars);
                     }
-                    // Start dev server on allocated port
+                    // Start dev server on allocated port (warmup runs inside startDevServer)
                     const processId = await this.startDevServer(instanceId, initCommand, allocatedPort);
                     this.logger.info('Instance created successfully', { instanceId, processId, port: allocatedPort });
-
-                    await this.warmupDevServer(instanceId, allocatedPort);
 
                     // Expose the same port for preview URL
                     const previewResult = await sandbox.exposePort(allocatedPort, { hostname: getPreviewDomain(env) });
