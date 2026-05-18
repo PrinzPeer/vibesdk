@@ -76,24 +76,39 @@ export class DeploymentManager extends BaseAgentService<BaseProjectState> implem
     /**
      * Reset session ID (called on timeout or specific errors)
      */
-    resetSessionId(): void {
+    async resetSessionId(): Promise<void> {
         const logger = this.getLog();
         const state = this.getState();
         const oldSessionId = state.sessionId;
+        const oldInstanceId = state.sandboxInstanceId;
         const newSessionId = DeploymentManager.generateNewSessionId();
-        
+
         logger.info(`SessionId reset: ${oldSessionId} → ${newSessionId}`);
-        
+
+        // Shut down via the OLD client before we invalidate the cache. After
+        // cachedSandboxClient is nulled and sessionId swapped, the next
+        // getClient() binds to a different sandboxId and the orphaned
+        // dev-server (and on self-hosted Docker, the container) becomes
+        // unreachable for cleanup.
+        if (oldInstanceId) {
+            try {
+                await this.getClient().shutdownInstance(oldInstanceId);
+                logger.info(`Shut down stale instance ${oldInstanceId} during session reset`);
+            } catch (shutdownError) {
+                logger.warn(`Failed to shut down stale instance ${oldInstanceId} during session reset`, shutdownError);
+            }
+        }
+
         // Reset session ID in logger
         logger.setFields({
             sessionId: newSessionId,
         });
         // Invalidate cached sandbox client (tied to old sessionId)
         this.cachedSandboxClient = null;
-        
+
         // Update state
         this.setState({
-            ...state,
+            ...this.getState(),
             sessionId: newSessionId,
             sandboxInstanceId: undefined  // Clear instance on session reset
         });
@@ -416,20 +431,33 @@ export class DeploymentManager extends BaseAgentService<BaseProjectState> implem
                 const errorMsg = error instanceof Error ? error.message : String(error);
 
                 // Handle specific errors that require session reset
-                if (errorMsg.includes('Network connection lost') || 
-                    errorMsg.includes('Container service disconnected') || 
+                if (errorMsg.includes('Network connection lost') ||
+                    errorMsg.includes('Container service disconnected') ||
                     errorMsg.includes('Internal error in Durable Object storage')) {
                     logger.warn('Session-level error detected, resetting sessionId');
-                    this.resetSessionId();
+                    await this.resetSessionId();
                 }
-                
+
                 // After consecutive failures, reset session to get fresh sandbox
                 if (attempt % maxAttemptsBeforeSessionReset === 0) {
                     logger.warn(`${attempt} consecutive failures, resetting sessionId for fresh sandbox`);
-                    this.resetSessionId();
+                    await this.resetSessionId();
                 }
-                
-                // Clear instance ID from state
+
+                // If state still holds an instanceId (neither reset path fired),
+                // shut it down before the next attempt creates a fresh one.
+                // Without this the failed retry would orphan the previous
+                // dev-server (and on self-hosted Docker, the previous container)
+                // indefinitely.
+                const orphanedInstanceId = this.getState().sandboxInstanceId;
+                if (orphanedInstanceId) {
+                    try {
+                        await this.getClient().shutdownInstance(orphanedInstanceId);
+                        logger.info(`Shut down stale instance ${orphanedInstanceId} before retry`);
+                    } catch (shutdownError) {
+                        logger.warn(`Failed to shut down stale instance ${orphanedInstanceId} before retry`, shutdownError);
+                    }
+                }
                 this.setState({
                     ...this.getState(),
                     sandboxInstanceId: undefined
@@ -508,7 +536,7 @@ export class DeploymentManager extends BaseAgentService<BaseProjectState> implem
      */
     async ensureInstance(redeploy: boolean): Promise<DeploymentResult> {
         if (redeploy) {
-            this.resetSessionId();
+            await this.resetSessionId();
         }
         const state = this.getState();
         const { sandboxInstanceId } = state;
@@ -527,7 +555,16 @@ export class DeploymentManager extends BaseAgentService<BaseProjectState> implem
                     redeployed: false
                 };
             }
-            logger.error(`DEPLOYMENT CHECK FAILED: Failed to get status for instance ${sandboxInstanceId}, redeploying...`);
+            logger.error(`DEPLOYMENT CHECK FAILED: Instance ${sandboxInstanceId} unhealthy, shutting down before recreate`);
+            // Tear down the unhealthy instance before allocating a new one.
+            // resetSessionId() (above) already handles its own cleanup, so this
+            // path only runs when the existing id is being replaced by a fresh
+            // createNewInstance() within the same sandbox.
+            try {
+                await client.shutdownInstance(sandboxInstanceId);
+            } catch (shutdownError) {
+                logger.warn(`Failed to shut down unhealthy instance ${sandboxInstanceId}`, shutdownError);
+            }
         }
 
         const results = await this.createNewInstance();

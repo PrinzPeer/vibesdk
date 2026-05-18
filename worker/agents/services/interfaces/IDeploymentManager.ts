@@ -58,7 +58,7 @@ export interface IDeploymentManager {
     /**
      * Reset session ID (called on timeout or specific errors)
      */
-    resetSessionId(): void;
+    resetSessionId(): Promise<void>;
 
     /**
      * Run static analysis (lint + typecheck) on code

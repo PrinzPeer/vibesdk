@@ -67,15 +67,48 @@ export function handleWebSocketMessage(
                     logger.error('Error during deployment:', error);
                 });
                 break;
-            case WebSocketMessageRequests.PREVIEW:
-                // Deploy current state for preview
-                logger.info('Deploying for preview');
-                agent.getBehavior().deployToSandbox().then((deploymentResult) => {
-                    logger.info(`Preview deployed successfully!, deploymentResult:`, deploymentResult);
-                }).catch((error: unknown) => {
-                    logger.error('Error during preview deployment:', error);
-                });
+            case WebSocketMessageRequests.PREVIEW: {
+                // The iframe sends this when its warmup polling fails. On a
+                // self-hosted VPS that often happens because Vite is still
+                // re-optimizing — not because the sandbox is dead. If the
+                // current instance is still healthy, just re-broadcast its
+                // preview URL so the iframe re-warms. Running a full redeploy
+                // here can fail in the catch path and orphan the instance,
+                // leaking Docker containers over time.
+                const currentInstanceId = agent.state.sandboxInstanceId;
+                const runRedeploy = () => {
+                    agent.getBehavior().deployToSandbox().then((deploymentResult) => {
+                        logger.info(`Preview deployed successfully!, deploymentResult:`, deploymentResult);
+                    }).catch((error: unknown) => {
+                        logger.error('Error during preview deployment:', error);
+                    });
+                };
+                if (currentInstanceId) {
+                    agent.deploymentManager.getClient().getInstanceStatus(currentInstanceId)
+                        .then((status) => {
+                            if (status.success && status.isHealthy && status.previewURL) {
+                                logger.info(`Existing instance ${currentInstanceId} healthy; re-broadcasting preview without redeploy`);
+                                broadcastToConnections(agent, WebSocketMessageResponses.DEPLOYMENT_COMPLETED, {
+                                    previewURL: status.previewURL,
+                                    tunnelURL: status.tunnelURL ?? '',
+                                    instanceId: currentInstanceId,
+                                    message: 'Existing preview is still healthy',
+                                });
+                                return;
+                            }
+                            logger.info(`Instance ${currentInstanceId} unhealthy or missing preview URL; redeploying`);
+                            runRedeploy();
+                        })
+                        .catch((error: unknown) => {
+                            logger.error('Error checking instance status before preview redeploy:', error);
+                            runRedeploy();
+                        });
+                } else {
+                    logger.info('No current instance; deploying fresh preview');
+                    runRedeploy();
+                }
                 break;
+            }
             case WebSocketMessageRequests.CAPTURE_SCREENSHOT:
                 agent.getBehavior().captureScreenshot(parsedMessage.data.url, parsedMessage.data.viewport).then((screenshotResult) => {
                     if (!screenshotResult) {
