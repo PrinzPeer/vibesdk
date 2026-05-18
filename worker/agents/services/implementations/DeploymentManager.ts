@@ -90,13 +90,25 @@ export class DeploymentManager extends BaseAgentService<BaseProjectState> implem
         // getClient() binds to a different sandboxId and the orphaned
         // dev-server (and on self-hosted Docker, the container) becomes
         // unreachable for cleanup.
+        const oldClient = this.cachedSandboxClient ?? this.getClient();
         if (oldInstanceId) {
             try {
-                await this.getClient().shutdownInstance(oldInstanceId);
+                await oldClient.shutdownInstance(oldInstanceId);
                 logger.info(`Shut down stale instance ${oldInstanceId} during session reset`);
             } catch (shutdownError) {
                 logger.warn(`Failed to shut down stale instance ${oldInstanceId} during session reset`, shutdownError);
             }
+        }
+
+        // Destroy the underlying sandbox/container too. shutdownInstance only
+        // kills the dev-server process inside the container; the Docker
+        // container itself would otherwise linger until its sleepAfter timeout
+        // fires (which is why `docker ps` shows stale containers per session
+        // reset).
+        try {
+            await oldClient.destroySandbox();
+        } catch (destroyError) {
+            logger.warn(`Failed to destroy sandbox during session reset`, destroyError);
         }
 
         // Reset session ID in logger

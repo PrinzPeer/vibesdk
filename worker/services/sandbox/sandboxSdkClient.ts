@@ -1279,6 +1279,24 @@ export class SandboxSdkClient extends BaseSandboxService {
         }
     }
 
+    /**
+     * Destroy the underlying Sandbox Durable Object and stop its container.
+     * Used when we are abandoning this sandboxId (e.g. resetSessionId) so the
+     * Docker container does not linger until its sleepAfter timeout fires.
+     */
+    async destroySandbox(): Promise<void> {
+        try {
+            // Drop cached sessions tied to this sandbox — they reference a DO
+            // that is about to be torn down.
+            this.sessionCache.clear();
+            this.metadataCache.clear();
+            await this.getSandbox().destroy();
+            this.logger.info('Sandbox destroyed', { sandboxId: this.sandboxId });
+        } catch (error) {
+            this.logger.warn('Failed to destroy sandbox', { sandboxId: this.sandboxId, error });
+        }
+    }
+
     // ==========================================
     // FILE OPERATIONS
     // ==========================================

@@ -244,6 +244,17 @@ export abstract class BaseSandboxService {
      * Returns: { success: boolean, message?: string, error?: string }
      */
     abstract shutdownInstance(instanceId: string): Promise<ShutdownResponse>;
+
+    /**
+     * Destroy the underlying sandbox/container itself (not just the instance
+     * directory inside it). Implementations that manage their own container
+     * lifecycle (e.g. the local Docker-backed SandboxSdkClient) should stop
+     * and remove the container here. Hosted backends where the platform owns
+     * the lifecycle can leave this as a no-op.
+     */
+    async destroySandbox(): Promise<void> {
+        // No-op by default; overridden by implementations that own container lifecycle.
+    }
   
     // ==========================================
     // FILE OPERATIONS (Required)
